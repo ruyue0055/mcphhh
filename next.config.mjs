@@ -7,6 +7,12 @@ const nextConfig = {
       // 会跳过以 . 开头的隐藏路径。
       beforeFiles: [
         {
+          // 0. RFC 9728 路径式发现：新版客户端会先探测
+          // /.well-known/oauth-protected-resource/api/mcp（把资源路径拼在后面）
+          source: '/.well-known/oauth-protected-resource/api/mcp',
+          destination: '/api/resource-metadata',
+        },
+        {
           // 1. 受保护资源元数据（RFC 9728）—— 客户端靠它找到授权服务器，缺了就报"验证网址重试"
           source: '/.well-known/oauth-protected-resource',
           destination: '/api/resource-metadata',
