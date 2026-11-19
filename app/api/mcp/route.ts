@@ -1,5 +1,6 @@
-import { createMcpHandler } from "mcp-handler";
+import { createMcpHandler, withMcpAuth } from "mcp-handler";
 import { z } from "zod";
+import { ISSUER, readAccessToken } from "../../lib/oauth-core";
 
 // ============================================================
 // 环境变量
@@ -128,5 +129,31 @@ const handler = createMcpHandler(
   }
 );
 
+// 鉴权包装：没有 Bearer 令牌时返回 401，并在 WWW-Authenticate 头里带上
+// resource_metadata 地址。Gemini / mcp-remote 正是靠这个头去发现授权服务器，
+// 从而弹出授权页；缺了它，客户端只会报"验证网址重试"。
+const authedHandler = withMcpAuth(
+  async (req) => handler(req),
+  async (_req, bearerToken) => {
+    if (!bearerToken) return undefined; // 交给 required: true 生成 401
+    const payload = readAccessToken(bearerToken);
+    if (!payload) return undefined;
+    return {
+      token: bearerToken,
+      clientId: payload.cid,
+      scopes: [],
+      expiresAt: Math.floor(payload.exp / 1000),
+    };
+  },
+  {
+    required: true,
+    // 注意：withMcpAuth 内部是 `${resourceUrl}${resourceMetadataPath}` 直接拼接，
+    // 所以这里只能给"站点根地址"，不能带 /api/mcp 路径，
+    // 否则 WWW-Authenticate 会指向 .../api/mcp/.well-known/... 这种不存在的路径。
+    resourceUrl: ISSUER,
+    resourceMetadataPath: "/.well-known/oauth-protected-resource",
+  }
+);
+
 // Next.js 路由需要把 handler 挂到 GET/POST/DELETE 三个方法上
-export { handler as GET, handler as POST, handler as DELETE };
+export { authedHandler as GET, authedHandler as POST, authedHandler as DELETE };
