@@ -119,7 +119,10 @@ const handler = createMcpHandler(
   },
   {},
   {
-    basePath: "/api/mcp",
+    // 本文件位于 app/api/mcp/route.ts，请求路径就是 /api/mcp。
+    // mcp-handler 会拼成 basePath + "/mcp"，所以 basePath 必须是 "/api"，
+    // 写成 "/api/mcp" 会让它只认 /api/mcp/mcp，导致 /api/mcp 返回 "Not found"。
+    basePath: "/api",
     maxDuration: 60,
     verboseLogs: true,
   }
