@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "my-memory": {
+      "command": "npx",
+      "args": ["mcp-remote", "https://YOUR_PROJECT.vercel.app/api/mcp"]
+    }
+  }
+}
