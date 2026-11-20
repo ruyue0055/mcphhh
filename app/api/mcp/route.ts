@@ -16,8 +16,45 @@ type Memory = {
   id: string;
   topic: string;
   content: string;
-  tags?: string[];
+  tags: string[];
+  raw: string; // 原始 JSONL 行，用作全文兜底检索（日期等也能命中）
 };
+
+type RawMemory = Record<string, unknown>;
+
+function asString(v: unknown): string {
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  return "";
+}
+
+function pickString(obj: RawMemory, keys: string[]): string {
+  for (const k of keys) {
+    const v = obj[k];
+    if (typeof v === "string" && v.trim()) return v;
+    if (typeof v === "number") return String(v);
+  }
+  return "";
+}
+
+function pickTags(obj: RawMemory): string[] {
+  const v = obj.tags ?? obj.labels ?? obj.keywords;
+  if (Array.isArray(v)) return v.map(asString).filter(Boolean);
+  if (typeof v === "string") return v.split(/[,，;；\s]+/).filter(Boolean);
+  return [];
+}
+
+// 字段名容错：不同记忆库键名可能不同（topic/title、content/text 等），统一归一化；
+// 缺失字段一律落成空串，绝不让 undefined 流到后续 toLowerCase。
+function normalize(raw: RawMemory, line: string): Memory {
+  return {
+    id: asString(raw.id),
+    topic: pickString(raw, ["topic", "title", "category", "subject", "name"]),
+    content: pickString(raw, ["content", "text", "summary", "body", "note", "description"]),
+    tags: pickTags(raw),
+    raw: line,
+  };
+}
 
 // 简单内存缓存，缓解 Serverless 冷启动时反复去 GitHub 拉文件
 let cache: { data: Memory[]; ts: number } | null = null;
@@ -37,24 +74,35 @@ async function loadMemories(): Promise<Memory[]> {
   if (!res.ok) throw new Error(`拉取记忆库失败：HTTP ${res.status}`);
 
   const text = await res.text();
-  const data = text
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .map((l) => JSON.parse(l) as Memory);
+  const data: Memory[] = [];
+  let skipped = 0;
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    try {
+      const obj = JSON.parse(line) as RawMemory;
+      if (obj && typeof obj === "object") data.push(normalize(obj, line));
+      else skipped++;
+    } catch {
+      skipped++; // 坏行跳过，不影响其余条目
+    }
+  }
+  if (skipped > 0) console.warn(`memory.jsonl 有 ${skipped} 行无法解析，已跳过`);
 
   cache = { data, ts: now };
   return data;
 }
 
 // 一个非常朴素的关键词打分，够用；以后可换成向量检索(RAG)
+// 检索面 = 主题 + 正文 + 标签 + 原始 JSONL 行（日期、id 等任意字段都能命中）
 function score(m: Memory, q: string): number {
-  const words = q.toLowerCase().split(/\s+/).filter(Boolean);
-  const hay = `${m.topic} ${m.content} ${(m.tags ?? []).join(" ")}`.toLowerCase();
+  const words = (q ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+  const tags = m.tags ?? [];
+  const hay = `${m.topic ?? ""} ${m.content ?? ""} ${tags.join(" ")} ${m.raw ?? ""}`.toLowerCase();
   let s = 0;
   for (const w of words) {
-    if (m.tags?.some((t) => t.toLowerCase() === w)) s += 3;
-    if (m.topic.toLowerCase().includes(w)) s += 2;
+    if (tags.some((t) => t.toLowerCase() === w)) s += 3;
+    if ((m.topic ?? "").toLowerCase().includes(w)) s += 2;
     if (hay.includes(w)) s += 1;
   }
   return s;
@@ -90,7 +138,13 @@ const handler = createMcpHandler(
           .map((x) => x.m);
 
         const text = ranked.length
-          ? ranked.map((m) => `#${m.id} 【${m.topic}】\n${m.content}`).join("\n\n")
+          ? ranked
+              .map((m) => {
+                const head = `#${m.id || "?"} 【${m.topic || "（无主题）"}】`;
+                const body = m.content || m.raw || "（无正文）";
+                return `${head}\n${body}`;
+              })
+              .join("\n\n")
           : "没有找到相关记忆。";
         return { content: [{ type: "text", text }] };
       }
@@ -106,12 +160,17 @@ const handler = createMcpHandler(
       },
       async () => {
         const all = await loadMemories();
-        const topics = Array.from(new Set(all.map((m) => m.topic)));
+        const topics = Array.from(
+          new Set(all.map((m) => m.topic).filter((t) => typeof t === "string" && t.trim() !== ""))
+        );
+        const noTopicCount = all.length - all.filter((m) => m.topic && m.topic.trim()).length;
+        const lines = topics.length ? topics.map((t) => `- ${t}`).join("\n") : "（暂无可识别的主题字段）";
+        const extra = noTopicCount > 0 ? `\n（另有 ${noTopicCount} 条缺少主题字段，仍可用 search_memory 按内容检索）` : "";
         return {
           content: [
             {
               type: "text",
-              text: `共 ${all.length} 条记忆，主题包括：\n- ${topics.join("\n- ")}`,
+              text: `共 ${all.length} 条记忆，主题包括：\n${lines}${extra}`,
             },
           ],
         };
