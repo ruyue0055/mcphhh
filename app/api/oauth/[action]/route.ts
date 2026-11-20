@@ -8,10 +8,12 @@ import {
   ISSUER,
   issueAccessToken,
   issueCode,
+  issueRefreshToken,
   isSafeRedirectUri,
   randomToken,
   readAccessToken,
   readCode,
+  readRefreshToken,
   s256,
 } from "../../../lib/oauth-core";
 
@@ -97,20 +99,47 @@ export async function POST(
     let code = "";
     let client_id = "";
     let code_verifier = "";
+    let grant_type = "";
+    let refresh_token_in = "";
 
     const contentType = request.headers.get("content-type") || "";
     if (contentType.includes("application/x-www-form-urlencoded")) {
       const form = await request.formData();
+      grant_type = String(form.get("grant_type") || "");
       code = String(form.get("code") || "");
       client_id = String(form.get("client_id") || "");
       code_verifier = String(form.get("code_verifier") || "");
+      refresh_token_in = String(form.get("refresh_token") || "");
     } else {
       const body = (await request.json().catch(() => ({}))) as Record<string, string>;
+      grant_type = body.grant_type || "";
       code = body.code || "";
       client_id = body.client_id || "";
       code_verifier = body.code_verifier || "";
+      refresh_token_in = body.refresh_token || "";
     }
 
+    // 分支一：用刷新令牌续期（Gemini / Google 关联后会定期走这里）
+    if (grant_type === "refresh_token") {
+      const rt = readRefreshToken(refresh_token_in);
+      if (!rt) {
+        return json({ error: "invalid_grant", error_description: "刷新令牌无效或已过期" }, 400);
+      }
+      if (rt.cid !== client_id) {
+        return json({ error: "invalid_grant", error_description: "client_id 不匹配" }, 400);
+      }
+      const renewed = issueAccessToken(rt.cid);
+      return json({
+        access_token: renewed.accessToken,
+        token_type: "Bearer",
+        expires_in: renewed.expiresIn,
+        scope: "",
+        // 滚动刷新：同时发一张新的刷新令牌，旧的那张在有效期内自然过期
+        refresh_token: issueRefreshToken(rt.cid),
+      });
+    }
+
+    // 分支二：授权码换令牌
     const record = readCode(code);
     if (!record) {
       return json({ error: "invalid_grant", error_description: "授权码无效或已过期" }, 400);
@@ -133,6 +162,9 @@ export async function POST(
       token_type: "Bearer",
       expires_in: expiresIn,
       scope: "",
+      // Google 的账号关联需要长期会话，响应里必须带 refresh_token，
+      // 否则 Gemini 可能停在"必须关联账号"这一步
+      refresh_token: issueRefreshToken(record.cid),
     });
   }
 

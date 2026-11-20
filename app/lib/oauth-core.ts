@@ -2,7 +2,7 @@
 // 授权流程的核心：把状态签进令牌里，而不是存在内存中。
 //
 // 为什么要这么做：Vercel 是 Serverless，authorize 和 token 两个请求很可能落到
-// 不同实例上。之前用 global.xxx 内存存授权码，实例一换码就"查无此码"，
+// 不同实例上。用 global.xxx 内存存授权码，实例一换码就"查无此码"，
 // Gemini 的授权就会中途失败。改成 HMAC 自包含签名令牌后，任何实例都能独立校验，
 // 不需要 Redis / KV，也不需要额外注册任何服务。
 
@@ -18,6 +18,7 @@ const SECRET = process.env.OAUTH_TOKEN_SECRET || "CHANGE-ME-set-OAUTH_TOKEN_SECR
 
 const CODE_TTL_MS = 10 * 60 * 1000; // 授权码 10 分钟
 const TOKEN_TTL_MS = 60 * 60 * 1000; // 访问令牌 1 小时
+const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 刷新令牌 30 天
 
 export type CodePayload = {
   typ: "code";
@@ -29,6 +30,12 @@ export type CodePayload = {
 
 export type TokenPayload = {
   typ: "at";
+  cid: string;
+  exp: number;
+};
+
+export type RefreshPayload = {
+  typ: "rt";
   cid: string;
   exp: number;
 };
@@ -46,7 +53,7 @@ function sign(payload: object) {
   return `${body}.${hmac(body)}`;
 }
 
-function verify<T>(token: string, expect: "code" | "at"): T | null {
+function verify<T>(token: string, expect: "code" | "at" | "rt"): T | null {
   if (!token) return null;
   const dot = token.lastIndexOf(".");
   if (dot <= 0) return null;
@@ -96,6 +103,17 @@ export function issueAccessToken(client_id: string) {
 
 export function readAccessToken(token: string) {
   return verify<TokenPayload>(token, "at");
+}
+
+// Google 的账号关联需要长期会话：拿不到 refresh_token 时，
+// 关联环节可能直接失败（Gemini 报"必须关联账号"）。
+export function issueRefreshToken(client_id: string) {
+  const payload: RefreshPayload = { typ: "rt", cid: client_id, exp: Date.now() + REFRESH_TTL_MS };
+  return sign(payload);
+}
+
+export function readRefreshToken(token: string) {
+  return verify<RefreshPayload>(token, "rt");
 }
 
 // PKCE S256：base64url(sha256(code_verifier))
